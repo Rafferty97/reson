@@ -1,9 +1,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use reson::{MidiEvent, Note, Portamento, Synth, SynthOpts, Tuning, Voice};
 use ringbuf::HeapRb;
-use std::f32::consts::PI;
 use std::sync::mpsc;
 use std::time::Duration;
+use reson::blep::{Triangle, Waveform};
 
 fn main() {
     // A channel for sending MIDI events to the synth
@@ -25,13 +25,13 @@ fn main() {
     let mut synth = Synth::new(
         SynthOpts {
             tuning: Tuning::concert_pitch(),
-            max_voices: 12,
+            max_voices: 2,
             max_block_size: 256,
             mono: false,
             portamento: Portamento::Off,
             max_pitch_bend: 2.0,
         },
-        SimpleVoice::new(),
+        SimpleVoice::<Triangle>::new(),
     );
     synth.set_sample_rate(sample_rate);
 
@@ -131,31 +131,33 @@ pub fn play_audio(mut rx: impl FnMut(&mut [f32]) + Send + 'static) -> u32 {
 }
 
 #[derive(Copy, Clone)]
-pub struct SimpleVoice {
+pub struct SimpleVoice<W: Waveform> {
+    inv_sample_rate: f32,
+    osc: W,
     phase: f32,
     on: bool,
     amp: f32,
-    inv_sample_rate: f32,
 }
 
-impl SimpleVoice {
+impl<W: Waveform + Default> SimpleVoice<W> {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Default for SimpleVoice {
+impl<W: Waveform + Default> Default for SimpleVoice<W> {
     fn default() -> Self {
         Self {
+            inv_sample_rate: 0.0,
+            osc: W::default(),
             phase: 0.0,
             on: false,
             amp: 0.0,
-            inv_sample_rate: 0.0,
         }
     }
 }
 
-impl Voice for SimpleVoice {
+impl<W: Waveform> Voice for SimpleVoice<W> {
     fn set_sample_rate(&mut self, sample_rate: u32) {
         self.inv_sample_rate = (sample_rate as f32).recip();
     }
@@ -178,9 +180,9 @@ impl Voice for SimpleVoice {
         if self.on || self.amp > 0.0 {
             let delta_amp = self.inv_sample_rate * 20.0 * if self.on { 1.0 } else { -1.0 };
             for sample in left.iter_mut() {
-                *sample = self.amp * (2.0 * PI * self.phase).sin();
-                self.phase += self.inv_sample_rate * pitch;
-                self.phase = self.phase.fract();
+                let delta_phase = self.inv_sample_rate * pitch;
+                *sample = self.amp * self.osc.sample(self.phase, delta_phase);
+                self.phase = (self.phase + delta_phase).fract();
                 self.amp = (self.amp + delta_amp).clamp(0.0, 1.0);
             }
             right.copy_from_slice(left);
