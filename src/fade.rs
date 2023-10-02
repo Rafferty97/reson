@@ -46,12 +46,13 @@ impl<const N: usize> FadeBuffer<N> {
 
     /// Reads from the internal buffer and adds it to the output.
     pub fn process(&mut self, output: [&mut [f32]; 2]) {
-        debug_assert!(output[0].len() == output[1].len());
+        let [left, right] = output;
+        debug_assert!(left.len() == right.len());
 
-        let len = usize::min(output[0].len(), N - self.index);
+        let len = usize::min(left.len(), N - self.index);
         for idx in 0..len {
-            output[0][idx] += self.buffer[0][self.index + idx];
-            output[1][idx] += self.buffer[1][self.index + idx];
+            left[idx] += self.buffer[0][self.index + idx];
+            right[idx] += self.buffer[1][self.index + idx];
         }
         self.index += len;
     }

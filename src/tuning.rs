@@ -1,6 +1,4 @@
-use std::cell::OnceCell;
 use std::sync::{Arc, OnceLock};
-use lazy_static::lazy_static;
 use crate::Note;
 
 /// Denotes the pitch in Hz for each MIDI note.
@@ -14,7 +12,7 @@ impl Tuning {
     pub fn equal_temperament(a4: f32) -> Self {
         let mut notes = [0.0; 128];
         for note in 0..128 {
-            notes[note] = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
+            notes[note] = a4 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
         }
         Self { notes }
     }

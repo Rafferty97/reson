@@ -132,11 +132,16 @@ impl<V: Voice + Clone> Synth<V> {
             .iter_mut()
             .min_by_key(|v| v.priority(note))
             .unwrap();
+
+        if voice.active() {
+            // Voice is stolen, so fade out
+            self.fade_out.add_voice(|buf| voice.process(self.pitch_bend, buf));
+            voice.reset();
+        }
+
         let pitch = self.opts.tuning.pitch(note);
         voice.trigger(note, velocity, pitch, self.counter);
         self.counter += 1;
-
-        // FIXME: Process fade out for voice stealing
     }
 
     /// Releases a note.
@@ -251,6 +256,12 @@ impl<V: Voice> VoiceHandle<V> {
     /// Sets the sample rate.
     fn set_sample_rate(&mut self, sample_rate: u32) {
         self.voice.set_sample_rate(sample_rate);
+    }
+
+    /// Resets the voice.
+    fn reset(&mut self) {
+        self.voice.reset();
+        self.phase = VoicePhase::Off;
     }
 
     /// Triggers a note.
