@@ -3,7 +3,7 @@ use reson::{MidiEvent, Note, Portamento, Synth, SynthOpts, Tuning, Voice};
 use ringbuf::HeapRb;
 use std::sync::mpsc;
 use std::time::Duration;
-use reson::blep::{Triangle, Waveform};
+use reson::blep::{Sawtooth, Waveform};
 
 fn main() {
     // A channel for sending MIDI events to the synth
@@ -25,13 +25,13 @@ fn main() {
     let mut synth = Synth::new(
         SynthOpts {
             tuning: Tuning::concert_pitch(),
-            max_voices: 2,
+            max_voices: 12,
             max_block_size: 256,
-            mono: false,
-            portamento: Portamento::Off,
+            mono: true,
+            portamento: Portamento::Variable(0.1),
             max_pitch_bend: 2.0,
         },
-        SimpleVoice::<Triangle>::new(),
+        SimpleVoice::<Sawtooth>::new(),
     );
     synth.set_sample_rate(sample_rate);
 
@@ -52,6 +52,8 @@ fn main() {
 
         // Synthesise audio
         synth.process([&mut left, &mut right]);
+        left.iter_mut().for_each(|s| *s *= 0.1);
+        right.iter_mut().for_each(|s| *s *= 0.1);
 
         // Interleave and write to the ring buffer
         interleave_stereo(&left, &right, &mut stereo);
@@ -137,6 +139,7 @@ pub struct SimpleVoice<W: Waveform> {
     phase: f32,
     on: bool,
     amp: f32,
+    vel: f32
 }
 
 impl<W: Waveform + Default> SimpleVoice<W> {
@@ -153,6 +156,7 @@ impl<W: Waveform + Default> Default for SimpleVoice<W> {
             phase: 0.0,
             on: false,
             amp: 0.0,
+            vel: 0.0
         }
     }
 }
@@ -167,8 +171,9 @@ impl<W: Waveform> Voice for SimpleVoice<W> {
         self.on = false;
     }
 
-    fn trigger(&mut self, _note: Note, _velocity: u8) {
+    fn trigger(&mut self, _note: Note, velocity: u8) {
         self.on = true;
+        self.vel = (velocity as f32) / 127.0;
     }
 
     fn release(&mut self) {
@@ -181,7 +186,7 @@ impl<W: Waveform> Voice for SimpleVoice<W> {
             let delta_amp = self.inv_sample_rate * 20.0 * if self.on { 1.0 } else { -1.0 };
             for sample in left.iter_mut() {
                 let delta_phase = self.inv_sample_rate * pitch;
-                *sample = self.amp * self.osc.sample(self.phase, delta_phase);
+                *sample = self.vel * self.amp * self.osc.sample(self.phase, delta_phase);
                 self.phase = (self.phase + delta_phase).fract();
                 self.amp = (self.amp + delta_amp).clamp(0.0, 1.0);
             }

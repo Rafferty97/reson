@@ -36,7 +36,7 @@ pub struct SynthOpts {
     pub max_voices: usize,
     /// If `true`, the synthesizer acts as a monophonic synth, despite the value of `max_voices`.
     pub mono: bool,
-    /// The portamento setting.
+    /// The portamento setting. This only has an effect is `mono` is true.
     pub portamento: Portamento,
     /// The maximum pitch bend of a MIDI pitch bend event in semitones.
     pub max_pitch_bend: f32,
@@ -55,10 +55,26 @@ pub enum Portamento {
     Variable(f32),
 }
 
+/// Contextual information provided to a [VoiceHandle] when triggered or released.
+struct VoiceCtx {
+    /// The sample rate in Hz.
+    sample_rate: u32,
+    /// The current portamento setting.
+    portamento: Portamento,
+    /// The current value of the monotonic counter.
+    counter: usize
+}
+
 struct VoiceHandle<V: Voice> {
+    /// The voice itself, which produces the audio.
     voice: V,
+    /// The phase of this voice, which may be actively playing, releasing, or inactive.
     phase: VoicePhase,
+    /// The pitch of the currently playing note.
     pitch: f32,
+    /// Information about the current note glide, if one is in progress.
+    glide: Option<GlideState>,
+    /// The value of the monotonic counter at the time this voice was last triggered/released.
     counter: usize,
 }
 
@@ -69,6 +85,19 @@ enum VoicePhase {
     Off,
 }
 
+/// Represents the pitch of a voice, which may be in the middle of a glide.
+#[derive(Clone, Copy)]
+struct GlideState {
+    /// The base-2 logarithm of the start pitch.
+    start: f32,
+    /// The base-2 logarithm of the target pitch.
+    target: f32,
+    /// The duration of the glide in samples.
+    duration: usize,
+    /// The current elapsed time of the glide in samples.
+    time: usize
+}
+
 impl<V: Voice + Clone> Synth<V> {
     /// Creates a new polyphonic synth with a fixed number of voices.
     ///
@@ -76,6 +105,7 @@ impl<V: Voice + Clone> Synth<V> {
     /// * `opts` - Configuration options for the polyphonic synth.
     /// * `voice` - A prototypical voice from which the bank of voices will be cloned.
     pub fn new(opts: SynthOpts, voice: V) -> Self {
+        Self::validate_opts(&opts);
         let mut out = Self {
             opts,
             buffer: vec![],
@@ -96,6 +126,7 @@ impl<V: Voice + Clone> Synth<V> {
     /// the maximum number of voices is increased or the maximum block size is increased.
     pub fn update_opts(&mut self, f: impl FnOnce(&mut SynthOpts)) {
         f(&mut self.opts);
+        Self::validate_opts(&self.opts);
         self.voices.resize_with(self.opts.max_voices, || {
             VoiceHandle::new(self.voice.clone())
         });
@@ -127,28 +158,44 @@ impl<V: Voice + Clone> Synth<V> {
     /// * `note` - The MIDI note being triggered, between 0 and 127.
     /// * `velocity` - The velocity of the note, between 0 and 127.
     pub fn trigger(&mut self, note: Note, velocity: u8) {
-        let voice = self
-            .voices
-            .iter_mut()
-            .min_by_key(|v| v.priority(note))
-            .unwrap();
+        let ctx = self.voice_ctx();
 
-        if voice.active() {
-            // Voice is stolen, so fade out
-            self.fade_out.add_voice(|buf| voice.process(self.pitch_bend, buf));
-            voice.reset();
-        }
+        let voice = if self.opts.mono {
+            &mut self.voices[0]
+        } else {
+            let voice = self
+                .voices
+                .iter_mut()
+                .min_by_key(|v| v.priority(note))
+                .unwrap();
+
+            if voice.active() {
+                // Voice is stolen, so fade out
+                self.fade_out.add_voice(|buf| voice.process(self.pitch_bend, buf));
+                voice.reset();
+            }
+
+            voice
+        };
 
         let pitch = self.opts.tuning.pitch(note);
-        voice.trigger(note, velocity, pitch, self.counter);
+        voice.trigger(note, velocity, pitch, &ctx);
         self.counter += 1;
     }
 
     /// Releases a note.
     pub fn release(&mut self, note: Note) {
-        let voice = self.voices.iter_mut().find(|v| v.note_on() == Some(note));
+        let ctx = self.voice_ctx();
+
+        let voice = if self.opts.mono {
+            let voice = &mut self.voices[0];
+            (voice.note_on() == Some(note)).then_some(voice)
+        } else {
+            self.voices.iter_mut().find(|v| v.note_on() == Some(note))
+        };
+
         if let Some(voice) = voice {
-            voice.release(self.counter);
+            voice.release(&ctx);
             self.counter += 1;
         }
     }
@@ -188,7 +235,12 @@ impl<V: Voice + Clone> Synth<V> {
         let mut written = false;
 
         // Process each active voice in turn.
-        for handle in &mut self.voices {
+        let voices = if self.opts.mono {
+            &mut self.voices[..1]
+        } else {
+            &mut self.voices
+        };
+        for handle in voices {
             if !handle.active() {
                 continue;
             }
@@ -211,6 +263,22 @@ impl<V: Voice + Clone> Synth<V> {
         // Apply the fade buffer
         self.fade_out.process([left, right]);
     }
+
+    /// Validates the synthesiser options.
+    fn validate_opts(opts: &SynthOpts) {
+        if opts.max_voices == 0 {
+            panic!("Synth must have at least one voice.");
+        }
+    }
+
+    /// Gets the context to pass to a voice being triggered/released.
+    fn voice_ctx(&self) -> VoiceCtx {
+        VoiceCtx {
+            sample_rate: self.sample_rate,
+            portamento: self.opts.portamento,
+            counter: self.counter
+        }
+    }
 }
 
 impl<V: Voice> VoiceHandle<V> {
@@ -219,6 +287,7 @@ impl<V: Voice> VoiceHandle<V> {
             voice,
             phase: VoicePhase::Off,
             pitch: 0.0,
+            glide: None,
             counter: 0,
         }
     }
@@ -265,15 +334,21 @@ impl<V: Voice> VoiceHandle<V> {
     }
 
     /// Triggers a note.
-    fn trigger(&mut self, note: Note, velocity: u8, pitch: f32, counter: usize) {
-        self.voice.trigger(note, velocity);
+    fn trigger(&mut self, note: Note, velocity: u8, pitch: f32, ctx: &VoiceCtx) {
+        if let Some(glide) = self.calc_glide(pitch, ctx) {
+            self.glide = Some(glide);
+        } else {
+            self.voice.trigger(note, velocity);
+            self.glide = None;
+        }
+
+        self.pitch = pitch;
         self.phase = VoicePhase::On(note);
-        self.pitch = pitch; // TODO: Portamento
-        self.counter = counter;
+        self.counter = ctx.counter;
     }
 
     /// Releases the current note.
-    pub fn release(&mut self, counter: usize) {
+    pub fn release(&mut self, ctx: &VoiceCtx) {
         let note = match self.phase {
             VoicePhase::On(note) => note,
             VoicePhase::Released(note) => note,
@@ -282,14 +357,65 @@ impl<V: Voice> VoiceHandle<V> {
 
         self.voice.release();
         self.phase = VoicePhase::Released(note);
-        self.counter = counter;
+        self.counter = ctx.counter;
     }
 
     /// Processes the voice into the provided output buffer.
     fn process(&mut self, pitch_bend: f32, output: [&mut [f32]; 2]) {
-        let active = self.voice.process(self.pitch * pitch_bend, output);
+        let num_samples = output[0].len();
+
+        // Process audio
+        let active = self.voice.process(self.pitch() * pitch_bend, output);
         if !active {
             self.phase = VoicePhase::Off;
+        }
+
+        // Update glide state
+        if let Some(glide) = &mut self.glide {
+            glide.time += num_samples;
+            if glide.time >= glide.duration {
+                self.glide = None;
+            }
+        }
+    }
+
+    /// Calculates the current pitch, accounting for glide but not pitch bend.
+    fn pitch(&self) -> f32 {
+        if let Some(glide) = self.glide {
+            let t = (glide.time as f32) / (glide.duration as f32);
+            2_f32.powf(glide.start + t * (glide.target - glide.start))
+        } else {
+            self.pitch
+        }
+    }
+
+    /// Calculates the glide which should be performed, if any, when a note is triggered.
+    ///
+    /// # Parameters
+    /// * `target_pitch` - Pitch of the triggered note in Hz.
+    /// * `ctx` - The context from the synth.
+    fn calc_glide(&self, target_pitch: f32, ctx: &VoiceCtx) -> Option<GlideState> {
+        // Only glide when a note is triggered while another is playing
+        if !matches!(self.phase, VoicePhase::On(_)) {
+            return None;
+        }
+
+        match ctx.portamento {
+            Portamento::Fixed(time) => {
+                let start = self.pitch().log2();
+                let target = target_pitch.log2();
+                let duration = (time * ctx.sample_rate as f32) as usize;
+                println!("{} {} {}", start, target, duration);
+                Some(GlideState { start, target, time: 0, duration })
+            }
+            Portamento::Variable(rate) => {
+                let start = self.pitch().log2();
+                let target = target_pitch.log2();
+                let distance = (start - target).abs();
+                let duration = (rate * distance * ctx.sample_rate as f32) as usize;
+                Some(GlideState { start, target, time: 0, duration })
+            }
+            Portamento::Off => None
         }
     }
 }

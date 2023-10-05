@@ -14,9 +14,8 @@ pub trait Voice {
 
     /// Triggers a note to be played.
     ///
-    /// When a voice is stolen or allocated to a new note, [reset] is invoked immediately
-    /// this method. In the case of a glide to a new note, or re-trigger of the same note,
-    /// [reset] is not invoked.
+    /// If the voice is still active, then [reset] is invoked immediately before this
+    /// method is called. Therefore, this method is always called on inactive voices.
     ///
     /// [reset]: Self::reset
     ///
@@ -24,6 +23,18 @@ pub trait Voice {
     /// * `note` - The MIDI note being triggered, between 0 and 127.
     /// * `velocity` - The velocity of the note, between 0 and 127.
     fn trigger(&mut self, note: Note, velocity: u8);
+
+    /// Triggers a note to be glided to.
+    ///
+    /// Most voices don't need to do anything when a glide is triggered,
+    /// so the default implementation of this method does nothing.
+    ///
+    /// # Parameters
+    /// * `note` - The MIDI note being triggered, between 0 and 127.
+    /// * `velocity` - The velocity of the note, between 0 and 127.
+    fn glide(&mut self, note: Note, velocity: u8) {
+        let _ = (note, velocity);
+    }
 
     /// Releases the currently playing note.
     fn release(&mut self);

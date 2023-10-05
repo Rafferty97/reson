@@ -1,0 +1,6 @@
+TODO
+
+- Normalise amplitude of triangle wave oscillator
+- Should oscillators be stateful?
+- Consider abstracting monophonic/polyphonic differences into `VoiceManager`
+- Implement voice stack for monophonic mode
