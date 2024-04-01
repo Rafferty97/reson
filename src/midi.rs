@@ -22,6 +22,7 @@ pub enum MidiEvent {
 }
 
 impl MidiEvent {
+    /// Creates a MIDI event from raw bytes.
     pub fn from_raw(data: &[u8]) -> Option<Self> {
         Some(match *data {
             [a @ 0x80..=0x8f, note, velocity] => MidiEvent::NoteOff {
